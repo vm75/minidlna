@@ -25,10 +25,10 @@ minidlnad_SOURCES = minidlna.c upnphttp.c upnpdescgen.c upnpsoap.c \
 			upnpreplyparse.c minixml.c clients.c \
 			getifaddr.c process.c upnpglobalvars.c \
 			options.c minissdp.c uuid.c upnpevents.c \
-			sql.c utils.c metadata.c scanner.c inotify.c \
+			sql.c utils.c metadata.c scanner.c monitor.c \
 			tivo_utils.c tivo_beacon.c tivo_commands.c \
 			playlist.c image_utils.c albumart.c log.c \
-			containers.c tagutils/tagutils.c \
+			containers.c avahi.c tagutils/tagutils.c \
 			dlnameta.c transcode.c
 scriptsdir = $(datadir)/minidlna/transcodescripts
 scripts_SCRIPTS = transcodescripts/transcode_audio transcodescripts/transcode_image \
@@ -36,13 +36,25 @@ scripts_SCRIPTS = transcodescripts/transcode_audio transcodescripts/transcode_im
 			transcodescripts/transcode_video-hardcodesub \
 			transcodescripts/transcode_video-hq
 
-#if NEED_VORBIS
-vorbisflag = -lvorbis
-#endif
+if HAVE_KQUEUE
+minidlnad_SOURCES += kqueue.c monitor_kqueue.c
+else
+minidlnad_SOURCES += select.c
+endif
 
-#if NEED_OGG
-flacoggflag = -logg
-#endif
+if HAVE_VORBISFILE
+vorbislibs = -lvorbis -logg
+else
+if NEED_OGG
+flacogglibs = -logg
+endif
+endif
+
+if TIVO_SUPPORT
+if HAVE_AVAHI
+avahilibs = -lavahi-client -lavahi-common
+endif
+endif
 
 minidlnad_CFLAGS = \
 	-D_FILE_OFFSET_BITS=64 \
@@ -59,7 +71,7 @@ minidlnad_LDADD = \
 	@LIBEXIF_LIBS@ \
 	@LIBINTL@ \
 	@LIBICONV@ \
-	-lFLAC  $(flacoggflag) $(vorbisflag)
+	-lFLAC $(flacogglibs) $(vorbislibs) $(avahilibs)
 
 minidlnad_LDFLAGS = @STATIC_LDFLAGS@
 
@@ -71,7 +83,7 @@ testupnpdescgen_LDADD = \
 	@LIBAVFORMAT_LIBS@ \
 	@LIBAVUTIL_LIBS@ \
 	@LIBEXIF_LIBS@ \
-	-lFLAC  $(flacoggflag) $(vorbisflag)
+	-lFLAC $(flacogglibs) $(vorbislibs) $(avahilibs)
 
 SUFFIXES = .tmpl .
 

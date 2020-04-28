@@ -71,7 +71,10 @@ static const struct {
 	{ TRANSCODE_VIDEO_CODECS, "transcode_video_codecs"},
 	{ TRANSCODE_VIDEOTRANSCODER, "transcode_video_transcoder"},
 	{ TRANSCODE_IMAGE, "transcode_image"},
-	{ TRANSCODE_IMAGETRANSCODER, "transcode_image_transcoder"}
+	{ TRANSCODE_IMAGETRANSCODER, "transcode_image_transcoder"},
+	{ WIDE_LINKS, "wide_links" },
+	{ TIVO_DISCOVERY, "tivo_discovery" },
+	{ ENABLE_SUBTITLES, "enable_subtitles" },
 };
 
 int
@@ -102,7 +105,7 @@ readoptionsfile(const char * fname)
 	while(fgets(buffer, sizeof(buffer), hfile))
 	{
 		linenum++;
-		t = strchr(buffer, '\n'); 
+		t = strchr(buffer, '\n');
 		if(t)
 		{
 			*t = '\0';
@@ -180,9 +183,9 @@ readoptionsfile(const char * fname)
 		}
 
 	}
-	
+
 	fclose(hfile);
-	
+
 	return 0;
 }
 
@@ -194,7 +197,7 @@ freeoptions(void)
 	struct album_art_name_s *art_names, *last_name;
 	struct transcode_info_s *last_entry;
 	struct transcode_list_format_s *tmp, *last_tmp, *cleaned_lists[4];
-	
+
 	media_path = media_dirs;
 	while (media_path)
 	{

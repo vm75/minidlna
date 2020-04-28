@@ -64,7 +64,10 @@ enum upnpconfigoptions {
 	TRANSCODE_VIDEO_CODECS,		/* video codecs that needs to be transcoded */
 	TRANSCODE_VIDEOTRANSCODER,	/* video transcoder */
 	TRANSCODE_IMAGE,			/* image files that needs to be transcoded */
-	TRANSCODE_IMAGETRANSCODER	/* image transcoder */
+	TRANSCODE_IMAGETRANSCODER,	/* image transcoder */
+	WIDE_LINKS,			/* allow following symlinks outside the defined media_dirs */
+	TIVO_DISCOVERY,			/* TiVo discovery protocol: bonjour or beacon. Defaults to bonjour if supported */
+	ENABLE_SUBTITLES,		/* Enable generic subtitle support for all clients by default */
 };
 
 /* readoptionsfile()
@@ -73,7 +76,7 @@ enum upnpconfigoptions {
 int
 readoptionsfile(const char * fname);
 
-/* freeoptions() 
+/* freeoptions()
  * frees memory allocated to option values */
 void
 freeoptions(void);

@@ -69,6 +69,7 @@
 #include <sys/wait.h>
 
 #include "config.h"
+#include "event.h"
 #include "upnpglobalvars.h"
 #include "upnphttp.h"
 #include "upnpdescgen.h"
@@ -110,8 +111,9 @@ static void SendResp_caption(struct upnphttp *, char * url);
 static void SendResp_resizedimg(struct upnphttp *, char * url);
 static void SendResp_thumbnail(struct upnphttp *, char * url);
 static void SendResp_dlnafile(struct upnphttp *, char * url);
+static void Process_upnphttp(struct event *ev);
 
-struct upnphttp * 
+struct upnphttp *
 New_upnphttp(int s)
 {
 	struct upnphttp * ret;
@@ -121,18 +123,21 @@ New_upnphttp(int s)
 	if(ret == NULL)
 		return NULL;
 	memset(ret, 0, sizeof(struct upnphttp));
-	ret->socket = s;
+	ret->ev = (struct event ){ .fd = s, .rdwr = EVENT_READ, .process = Process_upnphttp, .data = ret };
+	event_module.add(&ret->ev);
 	return ret;
 }
 
 void
 CloseSocket_upnphttp(struct upnphttp * h)
 {
-	if(close(h->socket) < 0)
+
+	event_module.del(&h->ev, EV_FLAG_CLOSING);
+	if(close(h->ev.fd) < 0)
 	{
-		DPRINTF(E_ERROR, L_HTTP, "CloseSocket_upnphttp: close(%d): %s\n", h->socket, strerror(errno));
+		DPRINTF(E_ERROR, L_HTTP, "CloseSocket_upnphttp: close(%d): %s\n", h->ev.fd, strerror(errno));
 	}
-	h->socket = -1;
+	h->ev.fd = -1;
 	h->state = 100;
 }
 
@@ -141,7 +146,7 @@ Delete_upnphttp(struct upnphttp * h)
 {
 	if(h)
 	{
-		if(h->socket >= 0)
+		if(h->ev.fd >= 0)
 			CloseSocket_upnphttp(h);
 		free(h->req_buf);
 		free(h->res_buf);
@@ -171,6 +176,10 @@ ParseHttpHeaders(struct upnphttp * h)
 				while(*p && (*p < '0' || *p > '9'))
 					p++;
 				h->req_contentlen = atoi(p);
+				if(h->req_contentlen < 0) {
+					DPRINTF(E_WARN, L_HTTP, "Invalid Content-Length %d", h->req_contentlen);
+					h->req_contentlen = 0;
+				}
 			}
 			else if(strncasecmp(line, "SOAPAction", 10)==0)
 			{
@@ -273,14 +282,14 @@ ParseHttpHeaders(struct upnphttp * h)
 				p = colon + 1;
 				while(isspace(*p))
 					p++;
-				for(n = 0; n<n_lan_addr; n++)
+				for(n = 0; n < n_lan_addr; n++)
 				{
-					for(i=0; lan_addr[n].str[i]; i++)
+					for(i = 0; lan_addr[n].str[i]; i++)
 					{
 						if(lan_addr[n].str[i] != p[i])
 							break;
 					}
-					if(!lan_addr[n].str[i])
+					if(i && !lan_addr[n].str[i])
 					{
 						h->iface = n;
 						break;
@@ -446,9 +455,7 @@ ParseHttpHeaders(struct upnphttp * h)
 next_header:
 		line = strstr(line, "\r\n");
 		if (!line)
-		{
 			return;
-		}
 		line += 2;
 	}
 	if( h->reqflags & FLAG_CHUNKED )
@@ -513,6 +520,21 @@ Send400(struct upnphttp * h)
 	CloseSocket_upnphttp(h);
 }
 
+/* very minimalistic 403 error message */
+static void
+Send403(struct upnphttp * h)
+{
+	static const char body403[] =
+		"<HTML><HEAD><TITLE>403 Forbidden</TITLE></HEAD>"
+		"<BODY><H1>Forbidden</H1>You don't have permission to access this resource."
+		"</BODY></HTML>\r\n";
+	h->respflags = FLAG_HTML;
+	BuildResp2_upnphttp(h, 403, "Forbidden",
+	                    body403, sizeof(body403) - 1);
+	SendResp_upnphttp(h);
+	CloseSocket_upnphttp(h);
+}
+
 /* very minimalistic 404 error message */
 static void
 Send404(struct upnphttp * h)
@@ -562,7 +584,7 @@ Send416(struct upnphttp * h)
 void
 Send500(struct upnphttp * h)
 {
-	static const char body500[] = 
+	static const char body500[] =
 		"<HTML><HEAD><TITLE>500 Internal Server Error</TITLE></HEAD>"
 		"<BODY><H1>Internal Server Error</H1>Server encountered "
 		"and Internal Error.</BODY></HTML>\r\n";
@@ -577,7 +599,7 @@ Send500(struct upnphttp * h)
 void
 Send501(struct upnphttp * h)
 {
-	static const char body501[] = 
+	static const char body501[] =
 		"<HTML><HEAD><TITLE>501 Not Implemented</TITLE></HEAD>"
 		"<BODY><H1>Not Implemented</H1>The HTTP Method "
 		"is not implemented by this server.</BODY></HTML>\r\n";
@@ -651,7 +673,7 @@ SendResp_presentation(struct upnphttp * h)
 		"<tr><td>Image files</td><td>%d</td></tr>"
 		"</table>", a, v, p);
 
-	if (scanning)
+	if (GETFLAG(SCANNING_MASK))
 		strcatf(&str,
 			"<br><i>* Media scan in progress</i><br>");
 
@@ -689,7 +711,7 @@ ProcessHTTPPOST_upnphttp(struct upnphttp * h)
 		{
 			/* we can process the request */
 			DPRINTF(E_DEBUG, L_HTTP, "SOAPAction: %.*s\n", h->req_soapActionLen, h->req_soapAction);
-			ExecuteSoapAction(h, 
+			ExecuteSoapAction(h,
 				h->req_soapAction,
 				h->req_soapActionLen);
 		}
@@ -772,7 +794,7 @@ ProcessHTTPSubscribe_upnphttp(struct upnphttp * h, const char * path)
 	if (type == E_SUBSCRIBE)
 	{
 		/* - add to the subscriber list
-		 * - respond HTTP/x.x 200 OK 
+		 * - respond HTTP/x.x 200 OK
 		 * - Send the initial event message */
 		/* Server:, SID:; Timeout: Second-(xx|infinite) */
 		sid = upnpevents_addSubscriber(path, h->req_Callback,
@@ -830,7 +852,7 @@ ProcessHTTPUnSubscribe_upnphttp(struct upnphttp * h, const char * path)
 	CloseSocket_upnphttp(h);
 }
 
-/* Parse and process Http Query 
+/* Parse and process Http Query
  * called once all the HTTP headers have been received. */
 static void
 ProcessHttpQuery_upnphttp(struct upnphttp * h)
@@ -848,12 +870,6 @@ ProcessHttpQuery_upnphttp(struct upnphttp * h)
 	HttpCommand[i] = '\0';
 	while(*p==' ')
 		p++;
-	if(strncmp(p, "http://", 7) == 0)
-	{
-		p = p+7;
-		while(*p!='/')
-			p++;
-	}
 	for(i = 0; i<511 && *p && *p != ' ' && *p != '\r'; i++)
 		HttpUrl[i] = *(p++);
 	HttpUrl[i] = '\0';
@@ -863,8 +879,6 @@ ProcessHttpQuery_upnphttp(struct upnphttp * h)
 	for(i = 0; i<15 && *p && *p != '\r'; i++)
 		HttpVer[i] = *(p++);
 	HttpVer[i] = '\0';
-	/*DPRINTF(E_INFO, L_HTTP, "HTTP REQUEST : %s %s (%s)\n",
-	       HttpCommand, HttpUrl, HttpVer);*/
 
 	/* set the interface here initially, in case there is no Host header */
 	for(i = 0; i<n_lan_addr; i++)
@@ -1067,18 +1081,17 @@ ProcessHttpQuery_upnphttp(struct upnphttp * h)
 	}
 }
 
-
-void
-Process_upnphttp(struct upnphttp * h)
+static void
+Process_upnphttp(struct event *ev)
 {
 	char buf[2048];
+	struct upnphttp *h = ev->data;
 	int n;
-	if(!h)
-		return;
+
 	switch(h->state)
 	{
 	case 0:
-		n = recv(h->socket, buf, 2048, 0);
+		n = recv(h->ev.fd, buf, 2048, 0);
 		if(n<0)
 		{
 			DPRINTF(E_ERROR, L_HTTP, "recv (state0): %s\n", strerror(errno));
@@ -1124,7 +1137,7 @@ Process_upnphttp(struct upnphttp * h)
 		break;
 	case 1:
 	case 2:
-		n = recv(h->socket, buf, sizeof(buf), 0);
+		n = recv(h->ev.fd, buf, sizeof(buf), 0);
 		if(n < 0)
 		{
 			DPRINTF(E_ERROR, L_HTTP, "recv (state%d): %s\n", h->state, strerror(errno));
@@ -1251,7 +1264,7 @@ SendResp_upnphttp(struct upnphttp * h)
 {
 	int n;
 	DPRINTF(E_DEBUG, L_HTTP, "HTTP RESPONSE: %.*s\n", h->res_buflen, h->res_buf);
-	n = send(h->socket, h->res_buf, h->res_buflen, 0);
+	n = send(h->ev.fd, h->res_buf, h->res_buflen, 0);
 	if(n<0)
 	{
 		DPRINTF(E_ERROR, L_HTTP, "send(res_buf): %s\n", strerror(errno));
@@ -1269,11 +1282,11 @@ send_data(struct upnphttp * h, char * header, size_t size, int flags)
 {
 	int n;
 
-	n = send(h->socket, header, size, flags);
+	n = send(h->ev.fd, header, size, flags);
 	if(n<0)
 	{
 		DPRINTF(E_ERROR, L_HTTP, "send(res_buf): %s\n", strerror(errno));
-	} 
+	}
 	else if(n < h->res_buflen)
 	{
 		/* TODO : handle correctly this case */
@@ -1303,7 +1316,7 @@ send_file(struct upnphttp * h, int sendfd, off_t offset, off_t end_offset)
 		if( try_sendfile )
 		{
 			send_size = ( ((end_offset - offset) < MAX_BUFFER_SIZE) ? (end_offset - offset + 1) : MAX_BUFFER_SIZE);
-			ret = sys_sendfile(h->socket, sendfd, &offset, send_size);
+			ret = sys_sendfile(h->ev.fd, sendfd, &offset, send_size);
 			if( ret == -1 )
 			{
 				DPRINTF(E_DEBUG, L_HTTP, "sendfile error :: error no. %d [%s]\n", errno, strerror(errno));
@@ -1315,7 +1328,7 @@ send_file(struct upnphttp * h, int sendfd, off_t offset, off_t end_offset)
 			}
 			else
 			{
-				//DPRINTF(E_DEBUG, L_HTTP, "sent %lld bytes to %d. offset is now %lld.\n", ret, h->socket, offset);
+				//DPRINTF(E_DEBUG, L_HTTP, "sent %lld bytes to %d. offset is now %lld.\n", ret, h->ev.fd, offset);
 				continue;
 			}
 		}
@@ -1333,7 +1346,7 @@ send_file(struct upnphttp * h, int sendfd, off_t offset, off_t end_offset)
 			else
 				break;
 		}
-		ret = write(h->socket, buf, ret);
+		ret = write(h->ev.fd, buf, ret);
 		if( ret == -1 ) {
 			DPRINTF(E_DEBUG, L_HTTP, "write error :: error no. %d [%s]\n", errno, strerror(errno));
 			if( errno == EAGAIN )
@@ -1417,13 +1430,13 @@ send_file_transcode(char* transcoder, struct upnphttp * h, int offset, int end_o
 		}
 		total_byte_read += read_stream_size;
 		//DPRINTF(E_INFO, L_HTTP, "received %d bytes from FFMPEG in PID:%d\n", (int)read_stream_size, (int)getpid());
-		send_size = write(h->socket, buf, read_stream_size);
+		send_size = write(h->ev.fd, buf, read_stream_size);
 		if ( send_size != -1 ) total_byte_send += send_size;
 		if ( (send_size != -1) && (send_size != read_stream_size) ) {
 			DPRINTF(E_INFO, L_HTTP, "Client is full??\n");
 			read_stream_size -= send_size;
 			usleep(100000); /* wait 100mS */
-			send_size = write(h->socket, buf+send_size, read_stream_size);
+			send_size = write(h->ev.fd, buf+send_size, read_stream_size);
 			if ( send_size != -1 ) total_byte_send += send_size;
 		}
 		if ( send_size == -1 )
@@ -1434,11 +1447,11 @@ send_file_transcode(char* transcoder, struct upnphttp * h, int offset, int end_o
 		}
 		/*else
 		{
-			DPRINTF(E_DEBUG, L_HTTP, "sent %lld bytes to %d. offset is now %lld.\n", ret, h->socket, offset);
+			DPRINTF(E_DEBUG, L_HTTP, "sent %lld bytes to %d. offset is now %lld.\n", ret, h->ev.fd, offset);
 		}*/
 	}
 
-    close(fds[0].fd);
+	close(fds[0].fd);
 	free(buf);
 
 	kill(pid, SIGTERM);
@@ -1456,6 +1469,46 @@ send_file_transcode(char* transcoder, struct upnphttp * h, int offset, int end_o
 		kill(pid, SIGKILL);
 	}
 	DPRINTF(E_INFO, L_HTTP, "Total bytes : read=%lld, send=%lld\n", total_byte_read, total_byte_send);
+}
+
+static int
+_open_file(const char *orig_path)
+{
+	struct media_dir_s *media_path;
+	char buf[PATH_MAX];
+	const char *path;
+	int fd;
+
+	if (!GETFLAG(WIDE_LINKS_MASK))
+	{
+		path = realpath(orig_path, buf);
+		if (!path)
+		{
+			DPRINTF(E_ERROR, L_HTTP, "Error resolving path %s: %s\n",
+						orig_path, strerror(errno));
+			return -1;
+		}
+
+		for (media_path = media_dirs; media_path; media_path = media_path->next)
+		{
+			if (strncmp(path, media_path->path, strlen(media_path->path)) == 0)
+				break;
+		}
+		if (!media_path && strncmp(path, db_path, strlen(db_path)))
+		{
+			DPRINTF(E_ERROR, L_HTTP, "Rejecting wide link %s -> %s\n",
+						orig_path, path);
+			return -403;
+		}
+	}
+	else
+		path = orig_path;
+
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		DPRINTF(E_ERROR, L_HTTP, "Error opening %s\n", path);
+
+	return fd;
 }
 
 static void
@@ -1543,11 +1596,13 @@ SendResp_albumArt(struct upnphttp * h, char * object)
 	}
 	DPRINTF(E_INFO, L_HTTP, "Serving album art ID: %lld [%s]\n", id, path);
 
-	fd = open(path, O_RDONLY);
+	fd = _open_file(path);
 	if( fd < 0 ) {
-		DPRINTF(E_ERROR, L_HTTP, "Error opening %s\n", path);
 		sqlite3_free(path);
-		Send404(h);
+		if (fd == -403)
+			Send403(h);
+		else
+			Send404(h);
 		return;
 	}
 	sqlite3_free(path);
@@ -1591,11 +1646,13 @@ SendResp_caption(struct upnphttp * h, char * object)
 	}
 	DPRINTF(E_INFO, L_HTTP, "Serving caption ID: %lld [%s]\n", id, path);
 
-	fd = open(path, O_RDONLY);
+	fd = _open_file(path);
 	if( fd < 0 ) {
-		DPRINTF(E_ERROR, L_HTTP, "Error opening %s\n", path);
 		sqlite3_free(path);
-		Send404(h);
+		if (fd == -403)
+			Send403(h);
+		else
+			Send404(h);
 		return;
 	}
 	sqlite3_free(path);
@@ -1698,8 +1755,7 @@ SendResp_resizedimg(struct upnphttp * h, char * object)
 	char *key, *val;
 	char *saveptr, *item = NULL;
 	int rotate;
-	/* Not implemented yet *
-	char *pixelshape=NULL; */
+	int pixw = 0, pixh = 0;
 	long long id;
 	int rows=0, chunked, ret;
 	image_s *imsrc = NULL, *imdst = NULL;
@@ -1752,11 +1808,12 @@ SendResp_resizedimg(struct upnphttp * h, char * object)
 			rotate = (rotate + atoi(val)) % 360;
 			sql_exec(db, "UPDATE DETAILS set ROTATION = %d where ID = %lld", rotate, id);
 		}
-		/* Not implemented yet *
 		else if( strcasecmp(key, "pixelshape") == 0 )
 		{
-			pixelshape = val;
-		} */
+			ret = sscanf(val, "%d:%d", &pixw, &pixh);
+			if( ret != 2 )
+				pixw = pixh = 0;
+		}
 	}
 
 #if USE_FORK
@@ -1809,6 +1866,14 @@ SendResp_resizedimg(struct upnphttp * h, char * object)
 	{
 		dsth = height;
 		dstw = (((height<<10)/srch) * srcw>>10);
+	}
+	/* Account for pixel shape */
+	if( pixw && pixh )
+	{
+		if( pixh > pixw )
+			dsth = dsth * pixw / pixh;
+		else if( pixw > pixh )
+			dstw = dstw * pixh / pixw;
 	}
 
 	if( dstw <= 160 && dsth <= 160 )
@@ -1911,7 +1976,7 @@ SendResp_dlnafile(struct upnphttp *h, char *object)
 	char buf[128];
 	char **result;
 	int rows, ret;
-	off_t total, size;
+	off_t total, offset, size;
 	int64_t id;
 	int sendfh;
 	int transcode_pid;
@@ -2071,7 +2136,7 @@ SendResp_dlnafile(struct upnphttp *h, char *object)
 				Send500(h);
 				return;
 			}
-			
+
 			close(transcode_handle); /* causes ffmpeg transcoder to exit, TODO: check if this is true for other transcoders, too */
 			if( dlna_metadata.mime == NULL && dlna_metadata.dlna_pn == NULL ) {
 				DPRINTF(E_ERROR, L_HTTP, "Cannot obtain metadata.\n");
@@ -2103,7 +2168,7 @@ SendResp_dlnafile(struct upnphttp *h, char *object)
 				if( strcmp(last_file.mime+6, "x-matroska") == 0 )
 					strcpy(last_file.mime+8, "mkv");
 				/* Samsung TV's such as the A750 can natively support many
-				   Xvid/DivX AVI's however, the DLNA server needs the 
+				   Xvid/DivX AVI's however, the DLNA server needs the
 				   mime type to say video/mpeg */
 				else if( ctype == ESamsungSeriesA && strcmp(last_file.mime+6, "x-msvideo") == 0 )
 					strcpy(last_file.mime+6, "mpeg");
@@ -2119,7 +2184,7 @@ SendResp_dlnafile(struct upnphttp *h, char *object)
 					strcpy(last_file.mime+6, "divx");
 			}
 		}
-		
+
 		sqlite3_free_table(result);
 	}
 #if USE_FORK
@@ -2163,10 +2228,13 @@ SendResp_dlnafile(struct upnphttp *h, char *object)
 		}
 	}
 
-	sendfh = open(last_file.path, O_RDONLY);
+	offset = h->req_RangeStart;
+	sendfh = _open_file(last_file.path);
 	if( sendfh < 0 ) {
-		DPRINTF(E_ERROR, L_HTTP, "Error opening %s\n", last_file.path);
-		Send404(h);
+		if (sendfh == -403)
+			Send403(h);
+		else
+			Send404(h);
 		goto error;
 	}
 	size = lseek(sendfh, 0, SEEK_END);

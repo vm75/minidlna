@@ -231,6 +231,71 @@ put_pix_alpha_replace(image_s *pimage, int32_t x, int32_t y, pix col)
 }
 
 int
+image_get_jpeg_resolution(const char * path, int * width, int * height)
+{
+	FILE *img;
+	unsigned char buf[8];
+	uint16_t offset, h, w;
+	int ret = 1;
+	size_t nread;
+	long size;
+	
+
+	img = fopen(path, "r");
+	if( !img )
+		return -1;
+
+	fseek(img, 0, SEEK_END);
+	size = ftell(img);
+	rewind(img);
+
+	nread = fread(&buf, 2, 1, img);
+	if( (nread < 1) || (buf[0] != 0xFF) || (buf[1] != 0xD8) )
+	{
+		fclose(img);
+		return -1;
+	}
+	memset(&buf, 0, sizeof(buf));
+
+	while( ftell(img) < size )
+	{
+		while( nread > 0 && buf[0] != 0xFF && !feof(img) )
+			nread = fread(&buf, 1, 1, img);
+
+		while( nread > 0 && buf[0] == 0xFF && !feof(img) )
+			nread = fread(&buf, 1, 1, img);
+
+		if( (buf[0] >= 0xc0) && (buf[0] <= 0xc3) )
+		{
+			nread = fread(&buf, 7, 1, img);
+			*width = 0;
+			*height = 0;
+			if( nread < 1 )
+				break;
+			memcpy(&h, buf+3, 2);
+			*height = SWAP16(h);
+			memcpy(&w, buf+5, 2);
+			*width = SWAP16(w);
+			ret = 0;
+			break;
+		}
+		else
+		{
+			offset = 0;
+			nread = fread(&buf, 2, 1, img);
+			if( nread < 1 )
+				break;
+			memcpy(&offset, buf, 2);
+			offset = SWAP16(offset) - 2;
+			if( fseek(img, offset, SEEK_CUR) == -1 )
+				break;
+		}
+	}
+	fclose(img);
+	return ret;
+}
+
+int
 image_get_jpeg_date_xmp(const char * path, char ** date)
 {
 	FILE *img;
@@ -461,6 +526,7 @@ image_new_from_jpeg(const char *path, int is_file, const uint8_t *buf, int size,
 	}
 	else if(cinfo.output_components == 1)
 	{
+		int rx, ry;
 		ofs = 0;
 		for(i = 0; i < cinfo.rec_outbuf_height; i++)
 		{
@@ -478,12 +544,19 @@ image_new_from_jpeg(const char *path, int is_file, const uint8_t *buf, int size,
 		}
 		for(y = 0; y < h; y += cinfo.rec_outbuf_height)
 		{
+			ry = (rotate & (ROTATE_90|ROTATE_180)) ? (y - h + 1) * -1 : y;
 			jpeg_read_scanlines(&cinfo, line, cinfo.rec_outbuf_height);
 			for(i = 0; i < cinfo.rec_outbuf_height; i++)
 			{
 				for(x = 0; x < w; x++)
 				{
-					vimage->buf[ofs++] = COL(line[i][x], line[i][x], line[i][x]);
+					rx = (rotate & (ROTATE_180|ROTATE_270)) ?
+						(x - w + 1) * -1 : x;
+					ofs = (rotate & (ROTATE_90|ROTATE_270)) ?
+						ry + (rx * h) : rx + (ry * w);
+					if( ofs < maxbuf )
+						vimage->buf[ofs] =
+							COL(line[i][x], line[i][x], line[i][x]);
 				}
 			}
 		}
@@ -657,7 +730,7 @@ image_downsize(image_s * pdest, image_s * psrc, int32_t width, int32_t height)
 				{
 					vcol = get_pix(psrc, ((int32_t)rx)-half_square_width+i,
 					                     ((int32_t)ry)-half_square_height+j);
-          
+
 					if(((j == 0) || (j == (half_square_height<<1)-1)) && 
 					   ((i == 0) || (i == (half_square_width<<1)-1)))
 					{
@@ -689,12 +762,12 @@ image_downsize(image_s * pdest, image_s * psrc, int32_t width, int32_t height)
 					}
 				}
 			}
-      
+
 			red   /= width_scale*height_scale;
 			green /= width_scale*height_scale;
 			blue  /= width_scale*height_scale;
 			alpha /= width_scale*height_scale;
-      
+
 			/* on sature les valeurs */
 			red   = (red   > 255.0)? 255.0 : ((red   < 0.0)? 0.0:red  );
 			green = (green > 255.0)? 255.0 : ((green < 0.0)? 0.0:green);
@@ -784,7 +857,7 @@ image_save_to_jpeg_file(image_s * pimage, char * path)
 	buf = image_save_to_jpeg_buf(pimage, &size);
 	if( !buf )
 		return NULL;
- 	dst_file = fopen(path, "w");
+	dst_file = fopen(path, "w");
 	if( !dst_file )
 	{
 		free(buf);

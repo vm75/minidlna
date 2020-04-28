@@ -38,9 +38,10 @@
 #include <signal.h>
 #include <sys/wait.h>
 
+#include "config.h"
+#include "event.h"
 #include "upnpglobalvars.h"
 #include "process.h"
-#include "config.h"
 #include "log.h"
 
 struct child *children = NULL;
@@ -96,11 +97,14 @@ process_fork(struct client_cache_s *client)
 	pid_t pid = fork();
 	if (pid > 0)
 	{
-		number_of_children++;
 		if (client)
 			client->connections++;
 		add_process_info(pid, client);
-	}
+		number_of_children++;
+	} else if (pid == 0)
+		event_module.fini();
+	else
+		DPRINTF(E_FATAL, L_GENERAL, "Fork() failed: %s\n", strerror(errno));
 
 	return pid;
 }

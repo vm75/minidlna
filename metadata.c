@@ -1,5 +1,5 @@
 /* MiniDLNA media server
- * Copyright (C) 2008-2009  Justin Maggard
+ * Copyright (C) 2008-2017  Justin Maggard
  * Copyright (C) 2012  Lukas Jirkovsky
  *
  * This file is part of MiniDLNA.
@@ -72,13 +72,13 @@ check_for_captions(const char *path, int64_t detailID)
 	strncpyt(file, path, sizeof(file));
 	p = strip_ext(file);
 	if (!p)
-		p = strrchr(file, '\0');
+		return;
 
 	/* If we weren't given a detail ID, look for one. */
 	if (!detailID)
 	{
 		detailID = sql_get_int64_field(db, "SELECT ID from DETAILS where (PATH > '%q.' and PATH <= '%q.z')"
-		                            " and MIME glob 'video/*' limit 1", file, file);
+						   " and MIME glob 'video/*' limit 1", file, file);
 		if (detailID <= 0)
 		{
 			//DPRINTF(E_MAXDEBUG, L_METADATA, "No file found for caption %s.\n", path);
@@ -96,7 +96,7 @@ check_for_captions(const char *path, int64_t detailID)
 
 	if (ret == 0)
 	{
-		sql_exec(db, "INSERT into CAPTIONS"
+		sql_exec(db, "INSERT OR REPLACE into CAPTIONS"
 		             " (ID, PATH) "
 		             "VALUES"
 		             " (%lld, %Q)", detailID, file);
@@ -107,7 +107,7 @@ static void
 parse_nfo(const char *path, metadata_t *m)
 {
 	FILE *nfo;
-	char buf[65536];
+	char *buf;
 	struct NameValueParserData xml;
 	struct stat file;
 	size_t nread;
@@ -123,20 +123,27 @@ parse_nfo(const char *path, metadata_t *m)
 		return;
 	}
 	DPRINTF(E_DEBUG, L_METADATA, "Parsing .nfo file: %s\n", path);
-	nfo = fopen(path, "r");
-	if( !nfo )
+	buf = calloc(1, file.st_size + 1);
+	if (!buf)
 		return;
-	nread = fread(&buf, 1, sizeof(buf), nfo);
-	
+	nfo = fopen(path, "r");
+	if (!nfo)
+	{
+		free(buf);
+		return;
+	}
+	nread = fread(buf, 1, file.st_size, nfo);
+	fclose(nfo);
+
 	ParseNameValue(buf, nread, &xml, 0);
 
 	//printf("\ttype: %s\n", GetValueFromNameValueList(&xml, "rootElement"));
 	val = GetValueFromNameValueList(&xml, "title");
-	if( val )
+	if (val)
 	{
 		char *esc_tag, *title;
 		val2 = GetValueFromNameValueList(&xml, "episodetitle");
-		if( val2 )
+		if (val2)
 			xasprintf(&title, "%s - %s", val, val2);
 		else
 			title = strdup(val);
@@ -147,30 +154,49 @@ parse_nfo(const char *path, metadata_t *m)
 	}
 
 	val = GetValueFromNameValueList(&xml, "plot");
-	if( val ) {
+	if (val)
+	{
 		char *esc_tag = unescape_tag(val, 1);
 		m->comment = escape_tag(esc_tag, 1);
 		free(esc_tag);
 	}
 
 	val = GetValueFromNameValueList(&xml, "capturedate");
-	if( val ) {
+	if (val)
+	{
 		char *esc_tag = unescape_tag(val, 1);
 		m->date = escape_tag(esc_tag, 1);
 		free(esc_tag);
 	}
 
 	val = GetValueFromNameValueList(&xml, "genre");
-	if( val )
+	if (val)
 	{
-		free(m->genre);
 		char *esc_tag = unescape_tag(val, 1);
+		free(m->genre);
 		m->genre = escape_tag(esc_tag, 1);
 		free(esc_tag);
 	}
 
+	val = GetValueFromNameValueList(&xml, "mime");
+	if (val)
+	{
+		char *esc_tag = unescape_tag(val, 1);
+		free(m->mime);
+		m->mime = escape_tag(esc_tag, 1);
+		free(esc_tag);
+	}
+
+	val = GetValueFromNameValueList(&xml, "season");
+	if (val)
+		m->disc = atoi(val);
+
+	val = GetValueFromNameValueList(&xml, "episode");
+	if (val)
+		m->track = atoi(val);
+
 	ClearNameValueList(&xml);
-	fclose(nfo);
+	free(buf);
 }
 
 void
@@ -215,7 +241,7 @@ GetFolderMetadata(const char *name, const char *path, const char *artist, const 
 }
 
 int64_t
-GetAudioMetadata(const char *path, char *name)
+GetAudioMetadata(const char *path, const char *name)
 {
 	char type[4];
 	static char lang[6] = { '\0' };
@@ -271,6 +297,16 @@ GetAudioMetadata(const char *path, char *name)
 	{
 		strcpy(type, "pcm");
 	}
+	else if( ends_with(path, ".dsf") )
+	{
+		strcpy(type, "dsf");
+		m.mime = strdup("audio/x-dsd"); // TODO: fix
+	}
+	else if( ends_with(path, ".dff") )
+	{
+		strcpy(type, "dff");
+		m.mime = strdup("audio/x-dsd"); // TODO: fix
+	}
 	else
 	{
 		DPRINTF(E_WARN, L_METADATA, "Unhandled file extension on %s\n", path);
@@ -288,18 +324,14 @@ GetAudioMetadata(const char *path, char *name)
 	if( readtags((char *)path, &song, &file, lang, type) != 0 )
 	{
 		DPRINTF(E_WARN, L_METADATA, "Cannot extract tags from %s!\n", path);
-        	freetags(&song);
+		freetags(&song);
 		free_metadata(&m, free_flags);
 		return 0;
 	}
 
 	if( song.year )
 		xasprintf(&m.date, "%04d-01-01", song.year);
-	xasprintf(&m.duration, "%d:%02d:%02d.%03d",
-	                      (song.song_length/3600000),
-	                      (song.song_length/60000%60),
-	                      (song.song_length/1000%60),
-	                      (song.song_length%1000));
+	m.duration = duration_str(song.song_length);
 	if( song.title && *song.title )
 	{
 		m.title = trim(song.title);
@@ -311,7 +343,9 @@ GetAudioMetadata(const char *path, char *name)
 	}
 	else
 	{
-		m.title = name;
+		free_flags |= FLAG_TITLE;
+		m.title = strdup(name);
+		strip_ext(m.title);
 	}
 	for( i = ROLE_START; i < N_ROLE; i++ )
 	{
@@ -341,7 +375,7 @@ GetAudioMetadata(const char *path, char *name)
 			if( song.contributor[i] && *song.contributor[i] )
 				break;
 		}
-	        if( i <= ROLE_BAND )
+		if( i <= ROLE_BAND )
 		{
 			m.artist = trim(song.contributor[i]);
 			if( strlen(m.artist) > 48 )
@@ -423,7 +457,7 @@ GetAudioMetadata(const char *path, char *name)
 }
 
 int64_t
-GetImageMetadata(const char *path, char *name)
+GetImageMetadata(const char *path, const char *name)
 {
 	ExifData *ed;
 	ExifEntry *e = NULL;
@@ -522,7 +556,7 @@ GetImageMetadata(const char *path, char *name)
 			imsrc = image_new_from_jpeg(NULL, 0, ed->data, ed->size, 1, ROTATE_NONE);
 			if( imsrc )
 			{
- 				if( (imsrc->width <= 160) && (imsrc->height <= 160) )
+				if( (imsrc->width <= 160) && (imsrc->height <= 160) )
 					thumb = 1;
 				image_free(imsrc);
 			}
@@ -547,7 +581,7 @@ no_exifdata:
 	height = MagickGetImageHeight(magick_wand);
 	format = MagickGetImageFormat(magick_wand);
 	DestroyMagickWand(magick_wand);
-	
+
 	//DEBUG DPRINTF(E_DEBUG, L_METADATA, " * resolution: %dx%d\n", width, height);
 	if( !width || !height )
 	{
@@ -555,6 +589,8 @@ no_exifdata:
 		return 0;
 	}
 	xasprintf(&m.resolution, "%dx%d", width, height);
+	m.title = strdup(name);
+	strip_ext(m.title);
 
 	fd = open(path, O_RDONLY);
 	if ( fd < 0 )
@@ -572,7 +608,7 @@ no_exifdata:
 	                    " ROTATION, THUMBNAIL, CREATOR, DLNA_PN, MIME) "
 	                   "VALUES"
 	                   " (%Q, '%q', %lld, %lld, %Q, %Q, %u, %d, %Q, %Q, %Q);",
-	                   path, name, (long long)file.st_size, (long long)file.st_mtime, m.date,
+	                   path, m.title, (long long)file.st_size, (long long)file.st_mtime, m.date,
 	                   m.resolution, m.rotation, thumb, m.creator, dlna_metadata.dlna_pn, dlna_metadata.mime);
 	if( ret != SQLITE_OK )
 	{
@@ -590,13 +626,13 @@ no_exifdata:
 }
 
 int64_t
-GetVideoMetadata(const char *path, char *name)
+GetVideoMetadata(const char *path, const char *name)
 {
 	struct stat file;
 	int ret, i;
 	struct tm *modtime;
 	AVFormatContext *ctx = NULL;
-	AVCodecContext *ac = NULL, *vc = NULL;
+	AVStream *astream = NULL, *vstream = NULL;
 	int audio_stream = -1, video_stream = -1;
 	char fourcc[4];
 	int64_t album_art = 0;
@@ -626,27 +662,27 @@ GetVideoMetadata(const char *path, char *name)
 		return 0;
 	}
 	//dump_format(ctx, 0, NULL, 0);
-	for( i=0; i<ctx->nb_streams; i++)
+	for( i=0; i < ctx->nb_streams; i++)
 	{
-		if( audio_stream == -1 &&
-		    ctx->streams[i]->codec->codec_type == AVMEDIA_TYPE_AUDIO )
+		if( lav_codec_type(ctx->streams[i]) == AVMEDIA_TYPE_AUDIO &&
+		    audio_stream == -1 )
 		{
 			audio_stream = i;
-			ac = ctx->streams[audio_stream]->codec;
+			astream = ctx->streams[audio_stream];
 			continue;
 		}
-		else if( video_stream == -1 &&
+		else if( lav_codec_type(ctx->streams[i]) == AVMEDIA_TYPE_VIDEO &&
 		         !lav_is_thumbnail_stream(ctx->streams[i], &m.thumb_data, &m.thumb_size) &&
-			 ctx->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO )
+		         video_stream == -1 )
 		{
 			video_stream = i;
-			vc = ctx->streams[video_stream]->codec;
+			vstream = ctx->streams[video_stream];
 			continue;
 		}
 	}
 	path_cpy = strdup(path);
 	basepath = basename(path_cpy);
-	if( !vc )
+	if( !vstream )
 	{
 		/* This must not be a video file. */
 		lav_close(ctx);
@@ -656,15 +692,15 @@ GetVideoMetadata(const char *path, char *name)
 		return 0;
 	}
 
-	if( ac )
+	if( astream )
 	{
-		m.frequency = ac->sample_rate;
-		m.channels = ac->channels;
+		m.frequency = lav_sample_rate(astream);
+		m.channels = lav_channels(astream);
 	}
 
 	int duration, hours, min, sec, ms;
 	DPRINTF(E_DEBUG, L_METADATA, "Container: '%s' [%s]\n", ctx->iformat->name, basepath);
-	xasprintf(&m.resolution, "%dx%d", vc->width, vc->height);
+	xasprintf(&m.resolution, "%dx%d", vstream->codec->width, vstream->codec->height);
 	if( ctx->bit_rate > 8 )
 		m.bitrate = ctx->bit_rate / 8;
 	if( ctx->duration > 0 ) {
@@ -678,12 +714,12 @@ GetVideoMetadata(const char *path, char *name)
 
 	if( strcmp(ctx->iformat->name, "avi") == 0 )
 	{
-		if( vc->codec_id == AV_CODEC_ID_MPEG4 )
+		if( vstream->codec->codec_id == AV_CODEC_ID_MPEG4 )
 		{
-				fourcc[0] = vc->codec_tag     & 0xff;
-				fourcc[1] = vc->codec_tag>>8  & 0xff;
-				fourcc[2] = vc->codec_tag>>16 & 0xff;
-				fourcc[3] = vc->codec_tag>>24 & 0xff;
+				fourcc[0] = vstream->codec->codec_tag     & 0xff;
+				fourcc[1] = vstream->codec->codec_tag>>8  & 0xff;
+				fourcc[2] = vstream->codec->codec_tag>>16 & 0xff;
+				fourcc[3] = vstream->codec->codec_tag>>24 & 0xff;
 			if( memcmp(fourcc, "XVID", 4) == 0 ||
 				memcmp(fourcc, "DX50", 4) == 0 ||
 				memcmp(fourcc, "DIVX", 4) == 0 )
@@ -756,10 +792,8 @@ GetVideoMetadata(const char *path, char *name)
 	if( ext )
 	{
 		strcpy(ext+1, "nfo");
-		if( access(nfo, F_OK) == 0 )
-		{
+		if( access(nfo, R_OK) == 0 )
 			parse_nfo(nfo, &m);
-		}
 	}
 
 	if( !m.date )
@@ -770,7 +804,34 @@ GetVideoMetadata(const char *path, char *name)
 	}
 
 	if( !m.title )
+	{
 		m.title = strdup(name);
+		strip_ext(m.title);
+	}
+
+	if (!m.disc && !m.track)
+	{
+		/* Search for Season and Episode in the filename */
+		char *p = (char*)name, *s;
+		while ((s = strpbrk(p, "Ss")))
+		{
+			unsigned season = strtoul(s+1, &p, 10);
+			unsigned episode = 0;
+			if (season > 0 && p)
+			{
+				while (isblank(*p) || ispunct(*p))
+					p++;
+				if (*p == 'E' || *p == 'e')
+					episode = strtoul(p+1, NULL, 10);
+			}
+			if (season && episode)
+			{
+				m.disc = season;
+				m.track = episode;
+			}
+			p = s + 1;
+		}
+	}
 
 	album_art = find_album_art(path, m.thumb_data, m.thumb_size);
 	freetags(&video);
@@ -778,13 +839,13 @@ GetVideoMetadata(const char *path, char *name)
 
 	ret = sql_exec(db, "INSERT into DETAILS"
 	                   " (PATH, SIZE, TIMESTAMP, DURATION, DATE, CHANNELS, BITRATE, SAMPLERATE, RESOLUTION,"
-	                   "  TITLE, CREATOR, ARTIST, GENRE, COMMENT, DLNA_PN, MIME, ALBUM_ART) "
+	                   "  TITLE, CREATOR, ARTIST, GENRE, COMMENT, DLNA_PN, MIME, ALBUM_ART, DISC, TRACK) "
 	                   "VALUES"
-	                   " (%Q, %lld, %lld, %Q, %Q, %u, %u, %u, %Q, '%q', %Q, %Q, %Q, %Q, %Q, '%q', %lld);",
+	                   " (%Q, %lld, %lld, %Q, %Q, %u, %u, %u, %Q, '%q', %Q, %Q, %Q, %Q, %Q, '%q', %lld, %u, %u);",
 	                   path, (long long)file.st_size, (long long)file.st_mtime, m.duration,
 	                   m.date, m.channels, m.bitrate, m.frequency, m.resolution,
 	                   m.title, m.creator, m.artist, m.genre, m.comment, dlna_metadata.dlna_pn,
-	                   dlna_metadata.mime, album_art);
+	                   dlna_metadata.mime, album_art, m.disc, m.track);
 	if( ret != SQLITE_OK )
 	{
 		DPRINTF(E_ERROR, L_METADATA, "Error inserting details for '%s'!\n", path);

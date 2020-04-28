@@ -88,6 +88,9 @@ struct song_metadata {
 	int lossless;
 	int blockalignment;
 
+	char *mime;				// MIME type
+	char *dlna_pn;				// DLNA Profile Name
+
 	char *tagversion;
 
 	unsigned long album_id;
@@ -106,6 +109,8 @@ struct song_metadata {
 };
 
 #define WMA     0x161
+#define WMAPRO  0x162
+#define WMALSL  0x163
 
 extern int scan_init(char *path);
 extern void make_composite_tags(struct song_metadata *psong);

@@ -169,6 +169,29 @@ _asf_read_file_properties(FILE *fp, asf_file_properties_t *p, uint32_t size)
 	return 0;
 }
 
+static void
+_pick_dlna_profile(struct song_metadata *psong, uint16_t format)
+{
+	/* DLNA Profile Name */
+	switch( le16_to_cpu(format) )
+	{
+		case WMA:
+			if( psong->max_bitrate < 193000 )
+				xasprintf(&(psong->dlna_pn), "WMABASE");
+			else if( psong->max_bitrate < 385000 )
+				xasprintf(&(psong->dlna_pn), "WMAFULL");
+			break;
+		case WMAPRO:
+			xasprintf(&(psong->dlna_pn), "WMAPRO");
+			break;
+		case WMALSL:
+			xasprintf(&(psong->dlna_pn), "WMALSL%s",
+				psong->channels > 2 ? "_MULT5" : "");
+		default:
+			break;
+	}
+}
+
 static int
 _asf_read_audio_stream(FILE *fp, struct song_metadata *psong, int size)
 {
@@ -187,6 +210,7 @@ _asf_read_audio_stream(FILE *fp, struct song_metadata *psong, int size)
 	psong->samplerate = le32_to_cpu(s.wfx.nSamplesPerSec);
 	if (!psong->max_bitrate)
 		psong->max_bitrate = psong->bitrate;
+	_pick_dlna_profile(psong, s.wfx.wFormatTag);
 
 	return 0;
 }
@@ -219,6 +243,7 @@ _asf_read_media_stream(FILE *fp, struct song_metadata *psong, uint32_t size)
 		psong->samplerate = le32_to_cpu(wfx.nSamplesPerSec);
 		if (!psong->max_bitrate)
 			psong->max_bitrate = psong->bitrate;
+		_pick_dlna_profile(psong, wfx.wFormatTag);
 	}
 
 	return 0;
