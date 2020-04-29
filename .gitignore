@@ -36,3 +36,5 @@ stamp-h1
 .deps/
 *.o
 minidlnad
+*~
+*.bak

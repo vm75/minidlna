@@ -644,6 +644,7 @@ GetVideoMetadata(const char *path, const char *name)
 
 	memset(&m, '\0', sizeof(m));
 	memset(&video, '\0', sizeof(video));
+	memset(nfo, '\0', sizeof(nfo));
 
 	//DEBUG DPRINTF(E_DEBUG, L_METADATA, "Parsing video %s...\n", name);
 	if (stat(path, &file) != 0 ) {

@@ -133,7 +133,22 @@ OpenAndConfHTTPSocket(unsigned short port)
 	memset(&listenname, 0, sizeof(struct sockaddr_in));
 	listenname.sin_family = AF_INET;
 	listenname.sin_port = htons(port);
-	listenname.sin_addr.s_addr = htonl(INADDR_ANY);
+
+	/* TODO: network_interfaces supports 8 interfaces. */
+	/* bind to one network_interface, otherwise fallback to INADDR_ANY */
+	if (runtime_vars.ifaces[0] && !runtime_vars.ifaces[1])
+	{
+		reload_ifaces(0);
+		DPRINTF(E_INFO, L_GENERAL, "Using interface %s and address %s\n", runtime_vars.ifaces[0], lan_addr[0].str);
+		if (!lan_addr[0].str[0])
+			return -1;
+		listenname.sin_addr = lan_addr[0].addr;
+	}
+	else
+	{
+		DPRINTF(E_WARN, L_GENERAL, "Using INADDR_ANY\n");
+		listenname.sin_addr.s_addr = htonl(INADDR_ANY);
+	}
 
 	if (bind(s, (struct sockaddr *)&listenname, sizeof(struct sockaddr_in)) < 0)
 	{
@@ -1234,6 +1249,17 @@ main(int argc, char **argv)
 			                            "Inotify will be disabled.\n");
 		else if (pthread_create(&inotify_thread, NULL, start_inotify, NULL) != 0)
 			DPRINTF(E_FATAL, L_GENERAL, "ERROR: pthread_create() failed for start_inotify. EXITING\n");
+		else
+		{
+			pthread_attr_t attr, *attrptr = NULL;
+			if ((pthread_attr_init(&attr) == 0) && (pthread_attr_setstacksize(&attr, 192 * 1024) == 0))
+				attrptr = &attr;
+			else
+				DPRINTF(E_ERROR, L_GENERAL, "Failed to set inotify thread stack size,"
+							    "continuing with the default.\n");
+			if (pthread_create(&inotify_thread, attrptr, start_inotify, NULL) != 0)
+				DPRINTF(E_FATAL, L_GENERAL, "ERROR: pthread_create() failed for start_inotify. EXITING\n");
+		}
 	}
 #endif /* HAVE_INOTIFY */
 
