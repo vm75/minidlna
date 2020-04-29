@@ -8,8 +8,8 @@ jobs:
     steps:
     - uses: actions/checkout@v2
       with:
-        key: dev
+        ref: dev
     - name: install dependencies
-      run: apt install build-essential g++ autoconf autopoint pkg-config libexif-dev libjpeg-dev libid3tag0-dev libvorbis-dev libsqlite3-dev libavformat-dev libavutil-dev libavcodec-dev libmagickwand-dev libflac-dev gettext
+      run: sudo apt-get install build-essential g++ autoconf autopoint pkg-config libexif-dev libjpeg-dev libid3tag0-dev libvorbis-dev libsqlite3-dev libavformat-dev libavutil-dev libavcodec-dev libmagickwand-dev libflac-dev gettext
     - name: build
       run: ./autogen.sh && ./configure && make
